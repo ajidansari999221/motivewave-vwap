@@ -1,0 +1,164 @@
+package com.motivewave.platform.study.custom;
+
+import com.motivewave.platform.sdk.common.*;
+import com.motivewave.platform.sdk.common.desc.*;
+import com.motivewave.platform.sdk.study.Plot;
+import com.motivewave.platform.sdk.study.StudyHeader;
+import java.util.List;
+
+@StudyHeader(
+    id="CUSTOM_ROLLING_VWAP_ADVANCED",
+    name="Custom Rolling VWAP Advanced",
+    label="Rolling VWAP Advanced",
+    desc="Calculates Rolling VWAP with SD Bands, Diagonal Bid/Ask Imbalances, and Delta Tracking.",
+    menu="Custom",
+    overlay=true
+)
+public class RollingVWAP extends com.motivewave.platform.sdk.study.Study 
+{
+  enum Values { RVWAP, TOP_1SD, BOTTOM_1SD, TOP_2SD, BOTTOM_2SD, TOP_3SD, BOTTOM_3SD, DIAGONAL_DELTA };
+  enum Inputs { TYPE, PERIOD, SHOW_BANDS, SHOW_IMBALANCE, IMBALANCE_PCT };
+  enum Type { BARS, MINUTES };
+
+  @Override
+  public void initialize(Defaults defaults) 
+  {
+    var desc = getRuntimeDescriptor();
+    var inputs = desc.getInputs();
+    
+    // Core Configuration Inputs (Bar and timing tracking options)
+    inputs.add(Inputs.TYPE, new DiscreteInput("Calculation Type", Type.BARS));
+    inputs.add(Inputs.PERIOD, new IntegerInput("Rolling Window Period", 20, 1, 9999));
+    
+    // Visibility Toggles (On/Off switches inside Settings Window)
+    inputs.add(Inputs.SHOW_BANDS, new BooleanInput("Show SD Bands", true));
+    inputs.add(Inputs.SHOW_IMBALANCE, new BooleanInput("Show Diagonal Imbalances & Delta", true));
+    inputs.add(Inputs.IMBALANCE_PCT, new IntegerInput("Imbalance Threshold (%)", 300, 10, 2000));
+    
+    // Plots Setup
+    var plots = desc.getPlots();
+    plots.add(Values.RVWAP, new Plot("Rolling VWAP", PathDescriptor.createType(PathDescriptor.Type.LINE, defaults.getLineColor())));
+    
+    plots.add(Values.TOP_1SD, new Plot("Top 1SD", PathDescriptor.createType(PathDescriptor.Type.DASH, defaults.getLineColor())));
+    plots.add(Values.BOTTOM_1SD, new Plot("Bottom 1SD", PathDescriptor.createType(PathDescriptor.Type.DASH, defaults.getLineColor())));
+    
+    plots.add(Values.TOP_2SD, new Plot("Top 2SD", PathDescriptor.createType(PathDescriptor.Type.DOT, defaults.getLineColor())));
+    plots.add(Values.BOTTOM_2SD, new Plot("Bottom 2SD", PathDescriptor.createType(PathDescriptor.Type.DOT, defaults.getLineColor())));
+    
+    plots.add(Values.TOP_3SD, new Plot("Top 3SD", PathDescriptor.createType(PathDescriptor.Type.SOLID, defaults.getLineColor())));
+    plots.add(Values.BOTTOM_3SD, new Plot("Bottom 3SD", PathDescriptor.createType(PathDescriptor.Type.SOLID, defaults.getLineColor())));
+  }
+
+  @Override
+  protected void calculate(int index, DataContext ctx) 
+  {
+    var series = ctx.getDataSeries();
+    var settings = getSettings();
+    
+    Type calcType = (Type) settings.get(Inputs.TYPE);
+    int period = settings.getInteger(Inputs.PERIOD);
+    boolean showBands = settings.getBoolean(Inputs.SHOW_BANDS);
+    boolean showImbalance = settings.getBoolean(Inputs.SHOW_IMBALANCE);
+    double imbalanceThreshold = settings.getInteger(Inputs.IMBALANCE_PCT) / 100.0;
+    
+    if (index < 1) return;
+
+    double totalVolumePrice = 0;
+    double totalVolume = 0;
+    int lookbackBars = 0;
+
+    // Time Frame / Rolling Window Change Logic
+    if (calcType == Type.BARS) {
+        lookbackBars = period;
+        if (index < lookbackBars) return;
+        
+        for (int i = 0; i < lookbackBars; i++) {
+            int curIdx = index - i;
+            double close = series.getClose(curIdx);
+            double volume = series.getVolume(curIdx);
+            totalVolumePrice += (close * volume);
+            totalVolume += volume;
+        }
+    } else {
+        // Minutes-based lookback window tracking
+        long currentBarTime = series.getStartTime(index);
+        long cutoffTime = currentBarTime - ((long) period * 60 * 1000);
+        
+        int curIdx = index;
+        while (curIdx >= 0 && series.getStartTime(curIdx) >= cutoffTime) {
+            double close = series.getClose(curIdx);
+            double volume = series.getVolume(curIdx);
+            totalVolumePrice += (close * volume);
+            totalVolume += volume;
+            lookbackBars++;
+            curIdx--;
+        }
+    }
+
+    if (totalVolume <= 0 || lookbackBars <= 0) return;
+
+    // Calculate Core VWAP Line
+    double rvwap = totalVolumePrice / totalVolume;
+    series.setDouble(index, Values.RVWAP, rvwap);
+
+    // Calculate Standard Deviation Bands if Toggle is ON
+    if (showBands) {
+        double totalVariance = 0;
+        int startIdx = index - lookbackBars + 1;
+        if (startIdx < 0) startIdx = 0;
+
+        for (int i = startIdx; i <= index; i++) {
+            double close = series.getClose(i);
+            double diff = close - rvwap;
+            totalVariance += (diff * diff);
+        }
+        
+        double standardDeviation = Math.sqrt(totalVariance / lookbackBars);
+
+        series.setDouble(index, Values.TOP_1SD, rvwap + (1 * standardDeviation));
+        series.setDouble(index, Values.BOTTOM_1SD, rvwap - (1 * standardDeviation));
+        
+        series.setDouble(index, Values.TOP_2SD, rvwap + (2 * standardDeviation));
+        series.setDouble(index, Values.BOTTOM_2SD, rvwap - (2 * standardDeviation));
+        
+        series.setDouble(index, Values.TOP_3SD, rvwap + (3 * standardDeviation));
+        series.setDouble(index, Values.BOTTOM_3SD, rvwap - (3 * standardDeviation));
+    } else {
+        // Clear plots if toggled off
+        series.setDouble(index, Values.TOP_1SD, Double.NaN);
+        series.setDouble(index, Values.BOTTOM_1SD, Double.NaN);
+        series.setDouble(index, Values.TOP_2SD, Double.NaN);
+        series.setDouble(index, Values.BOTTOM_2SD, Double.NaN);
+        series.setDouble(index, Values.TOP_3SD, Double.NaN);
+        series.setDouble(index, Values.BOTTOM_3SD, Double.NaN);
+    }
+
+    // Diagonal Bid/Ask Delta Calculations if Toggle is ON
+    if (showImbalance) {
+        List<BarSize.Row> tickData = series.getRows(index);
+        if (tickData != null && tickData.size() > 1) {
+            double cumulativeBarDelta = 0;
+            
+            // Loop through prices diagonally (Bid at Price vs Ask at Price + 1 Tick)
+            for (int r = 0; r < tickData.size() - 1; r++) {
+                BarSize.Row bidRow = tickData.get(r);
+                BarSize.Row askRow = tickData.get(r + 1);
+                
+                double bidVol = bidRow.getBidVolume();
+                double askVol = askRow.getAskVolume();
+                
+                // Track absolute delta differences
+                cumulativeBarDelta += (askVol - bidVol);
+                
+                // Highlight diagonal imbalances based on threshold rule
+                if (bidVol > 0 && (askVol / bidVol) >= imbalanceThreshold) {
+                    ctx.getDriver().log("Diagonal Buy Imbalance at index " + index + " Price: " + askRow.getPrice());
+                } else if (askVol > 0 && (bidVol / askVol) >= imbalanceThreshold) {
+                    ctx.getDriver().log("Diagonal Sell Imbalance at index " + index + " Price: " + bidRow.getPrice());
+                }
+            }
+            series.setDouble(index, Values.DIAGONAL_DELTA, cumulativeBarDelta);
+        }
+    }
+  }
+}
